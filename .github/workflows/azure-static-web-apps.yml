@@ -49,6 +49,7 @@ jobs:
           action: upload
           app_location: "/" # where the source code lives in the repo
           output_location: "dist" # where `npm run build` puts the finished site
+          skip_deploy_on_missing_secrets: true
           # No api_location: this app has no backend, it's all client-side.
 
   # When a PR is closed, remove its temporary preview site.
