@@ -49,3 +49,8 @@ button:disabled { opacity: .5; cursor: not-allowed; }
   .scroll { overflow-x: visible; }
   table { font-size: .8rem; }
 }
+
+/* Copy buttons and notes */
+.copy { padding: 0 .35rem; margin-left: .4rem; font-size: .8rem; border: none; background: transparent; opacity: .55; }
+.copy:hover { opacity: 1; }
+p.note { color: var(--muted); font-size: .85rem; }

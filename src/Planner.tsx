@@ -7,7 +7,8 @@
 // (file pickers, downloads, window.print) — all the real work is pure functions
 // in src/subnet/ so it stays unit-tested.
 import { useMemo, useRef, useState } from "react";
-import { planNetwork, planToCsv, serializePlan, parseSavedPlan } from "./subnet";
+import { planNetwork, planToCsv, serializePlan, parseSavedPlan, planToMarkdown, planToText, planToHtml, growthAddresses, encodePlan, decodePlan } from "./subnet";
+import CopyButton, { copyText } from "./CopyButton";
 import type { PlanInput } from "./subnet";
 
 interface Row {
@@ -37,17 +38,42 @@ function download(filename: string, text: string, mimeType: string) {
   URL.revokeObjectURL(url); // free the temporary URL
 }
 
+/** A table cell with a copy button next to the value. */
+function C({ v, label }: { v: string; label: string }) {
+  return (
+    <td>
+      {v}
+      <CopyButton text={v} label={label} />
+    </td>
+  );
+}
+
+/** If the page was opened from a share link (#plan=...), read the plan out of it. */
+function readSharedPlan(): { input?: PlanInput; message: { ok: boolean; text: string } | null } {
+  const m = /^#plan=(.+)$/.exec(window.location.hash);
+  if (!m) return { message: null };
+  const r = decodePlan(m[1]);
+  return r.ok
+    ? { input: r.input, message: { ok: true, text: "Opened a shared plan. You can edit it, but your changes only stay on your screen." } }
+    : { message: { ok: false, text: r.error } };
+}
+
 export default function Planner() {
-  const [startBlock, setStartBlock] = useState("192.168.0.0/16");
-  const [buffer, setBuffer] = useState("20");
-  const [rows, setRows] = useState<Row[]>([
-    { id: 1, name: "Sales", devices: "50", vlan: "" },
-    { id: 2, name: "Engineering", devices: "120", vlan: "" },
-    { id: 3, name: "HR", devices: "8", vlan: "" },
-  ]);
-  const [nextId, setNextId] = useState(4);
+  const [shared] = useState(readSharedPlan);
+  const [startBlock, setStartBlock] = useState(shared.input?.startBlock ?? "192.168.0.0/16");
+  const [buffer, setBuffer] = useState(String(shared.input?.bufferPercent ?? 20));
+  const [rows, setRows] = useState<Row[]>(
+    shared.input
+      ? shared.input.departments.map((d, i) => ({ id: i + 1, name: d.name, devices: String(d.devices), vlan: d.vlanId == null ? "" : String(d.vlanId) }))
+      : [
+          { id: 1, name: "Sales", devices: "50", vlan: "" },
+          { id: 2, name: "Engineering", devices: "120", vlan: "" },
+          { id: 3, name: "HR", devices: "8", vlan: "" },
+        ],
+  );
+  const [nextId, setNextId] = useState(shared.input ? shared.input.departments.length + 1 : 4);
   // Message from the last "Load plan" attempt (null = nothing to report).
-  const [loadMessage, setLoadMessage] = useState<{ ok: boolean; text: string } | null>(null);
+  const [loadMessage, setLoadMessage] = useState<{ ok: boolean; text: string } | null>(shared.message);
   // The hidden file picker that "Load plan" clicks on the user's behalf.
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -83,6 +109,31 @@ export default function Planner() {
   const savePlan = () => {
     download(`subnet-plan-${dateStamp()}.json`, serializePlan(currentInput()), "application/json");
     setLoadMessage(null);
+  };
+
+  const exportMarkdown = () => {
+    if (!result.ok) return;
+    download(`subnet-plan-${dateStamp()}.md`, planToMarkdown(result.plan), "text/markdown");
+  };
+
+  /** Opens the print window. Choose "Save as PDF" as the printer. The title becomes the suggested file name. */
+  const exportPdf = () => {
+    const oldTitle = document.title;
+    document.title = `subnet-plan-${dateStamp()}`;
+    window.addEventListener("afterprint", () => (document.title = oldTitle), { once: true });
+    window.print();
+  };
+
+  const copyAll = async () => {
+    if (!result.ok) return;
+    const ok = await copyText(planToText(result.plan), planToHtml(result.plan));
+    setLoadMessage({ ok, text: ok ? "Copied the whole plan. Paste it into Teams, an email or a doc." : "Couldn't copy: your browser blocked the clipboard." });
+  };
+
+  const copyLink = async () => {
+    const url = `${window.location.origin}${window.location.pathname}#plan=${encodePlan(currentInput())}`;
+    const ok = await copyText(url);
+    setLoadMessage({ ok, text: ok ? "Copied a share link. Anyone who opens it sees this plan." : "Couldn't copy: your browser blocked the clipboard." });
   };
 
   /** Called when the user picks a file in the hidden file picker. */
@@ -168,6 +219,10 @@ export default function Planner() {
         <button onClick={() => window.print()} disabled={!result.ok} title={result.ok ? "" : "Fix the errors above first"}>
           Print
         </button>
+        <button onClick={exportMarkdown} disabled={!result.ok}>Export Markdown</button>
+        <button onClick={exportPdf} disabled={!result.ok} title="Opens the print window: choose Save as PDF">Export PDF</button>
+        <button onClick={copyAll} disabled={!result.ok}>Copy all</button>
+        <button onClick={copyLink} disabled={!result.ok}>Copy share link</button>
         <input
           ref={fileInputRef}
           type="file"
@@ -220,20 +275,21 @@ export default function Planner() {
               <thead>
                 <tr>
                   <th>Department</th><th>VLAN</th><th>Network</th><th>Mask</th><th>Gateway</th>
-                  <th>Usable range</th><th>Broadcast</th><th>Devices</th><th>Usable</th><th>Unused</th>
+                  <th>Usable range</th><th>Broadcast</th><th>Devices</th><th title="Extra addresses the growth buffer adds">Growth buffer</th><th>Usable hosts</th><th title="Usable hosts - 1 gateway - devices. Includes the growth buffer.">Free</th>
                 </tr>
               </thead>
               <tbody>
                 {result.plan.subnets.map((s) => (
                   <tr key={s.entryIndex}>
                     <td>{s.name}</td>
-                    <td>{s.vlanId}</td>
-                    <td>{s.network}/{s.prefix}</td>
-                    <td>{s.mask}</td>
-                    <td>{s.gateway}</td>
+                    <C v={String(s.vlanId)} label="VLAN" />
+                    <C v={`${s.network}/${s.prefix}`} label="network" />
+                    <C v={s.mask} label="subnet mask" />
+                    <C v={s.gateway} label="gateway" />
                     <td>{s.firstUsable} – {s.lastUsable}</td>
-                    <td>{s.broadcast}</td>
+                    <C v={s.broadcast} label="broadcast" />
                     <td>{fmt(s.devices)}</td>
+                    <td>{fmt(growthAddresses(s.devices, result.plan.bufferPercent))}</td>
                     <td>{fmt(s.usableHosts)}</td>
                     <td>{fmt(s.unused)}</td>
                   </tr>
@@ -241,6 +297,8 @@ export default function Planner() {
               </tbody>
             </table>
           </div>
+
+          <p className="note">Free = usable hosts − 1 gateway − devices. It includes the growth buffer, plus whatever is left because subnet sizes round up to a power of two.</p>
 
           <h2>Summary</h2>
           <dl>
